@@ -12,8 +12,9 @@
 
 例如您的Workers项目域名为：`registry.kdns.fr`；
 
-配置两个变量，DOCKER_HUB_TOKEN、DOCKER_HUB_USERNAME 对应dockerhub的账号和凭证
-cloudflare上配置cname ，*.registry.kdns.fr --> registry.kdns.fr
+配置两个变量，DOCKER_HUB_TOKEN、DOCKER_HUB_USERNAME 对应dockerhub的账号和凭证 
+
+cloudflare上配置cname ，*.registry.kdns.fr --> registry.kdns.fr 
 
 ### 1.官方镜像路径前面加域名
 
