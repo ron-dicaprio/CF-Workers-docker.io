@@ -17,7 +17,7 @@ function routeByHosts(host) {
 		"ghcr": "ghcr.io",
 		"cloudsmith": "docker.cloudsmith.io",
 		"nvcr": "nvcr.io",
-		"test": "registry-1.docker.io",
+		"hub": "registry-1.docker.io",
 	};
 	if (host in routes) return [routes[host], false];
 	else return [hub_host, true];
@@ -88,17 +88,19 @@ export default {
 			return new Response(await nginx(), { headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
 		}
 
+		// 修改目标主机为上游地址
 		url.hostname = hub_host;
+
 		const isDockerHub = hub_host === 'registry-1.docker.io' || hub_host === 'index.docker.io';
 		const dockerHubToken = env.DOCKER_HUB_TOKEN || null;
 		const dockerHubUsername = env.DOCKER_HUB_USERNAME || null;
 
-		// 构造用于 auth.docker.io 的 Basic Auth 头（仅当用户配置了用户名和令牌）
+		// 构造用于 auth.docker.io 的 Basic Auth 头（仅对 Docker Hub 生效）
 		const basicAuth = (isDockerHub && dockerHubUsername && dockerHubToken)
 			? 'Basic ' + btoa(`${dockerHubUsername}:${dockerHubToken}`)
 			: null;
 
-		// 处理 %3A -> library/
+		// 处理 %3A -> library/（仅 Docker Hub 的官方镜像）
 		if (!/%2F/.test(url.search) && /%3A/.test(url.toString())) {
 			url = new URL(url.toString().replace(/%3A(?=.*?&)/, '%3Alibrary%2F'));
 			console.log(`handle_url: ${url}`);
@@ -107,7 +109,7 @@ export default {
 		// ---------- 处理 /token 请求 ----------
 		if (url.pathname.includes('/token')) {
 			const headers = {
-				'Host': 'auth.docker.io',
+				'Host': isDockerHub ? 'auth.docker.io' : hub_host,
 				'User-Agent': getReqHeader("User-Agent"),
 				'Accept': getReqHeader("Accept"),
 				'Accept-Language': getReqHeader("Accept-Language"),
@@ -115,21 +117,24 @@ export default {
 				'Connection': 'keep-alive',
 				'Cache-Control': 'max-age=0'
 			};
-			// 如果配置了认证，附加 Basic Auth
-			if (basicAuth) {
+			// 仅对 Docker Hub 附加 Basic Auth
+			if (isDockerHub && basicAuth) {
 				headers['Authorization'] = basicAuth;
 			}
-			const token_url = auth_url + url.pathname + url.search;
+			// Docker Hub 重定向到 auth.docker.io，其他 registry 透传原请求
+			const token_url = isDockerHub
+				? auth_url + url.pathname + url.search
+				: url.href;
 			return fetch(new Request(token_url, request), { headers });
 		}
 
-		// 自动补全 library/ 路径
-		if (hub_host === 'registry-1.docker.io' && /^\/v2\/[^/]+\/[^/]+\/[^/]+$/.test(url.pathname) && !/^\/v2\/library/.test(url.pathname)) {
+		// 自动补全 library/ 路径（仅 Docker Hub）
+		if (isDockerHub && /^\/v2\/[^/]+\/[^/]+\/[^/]+$/.test(url.pathname) && !/^\/v2\/library/.test(url.pathname)) {
 			url.pathname = '/v2/library/' + url.pathname.split('/v2/')[1];
 		}
 
-		// ---------- 需要先换 token 的请求（manifests/blobs/tags）----------
-		const needToken = url.pathname.startsWith('/v2/') && (
+		// ---------- 需要先获取 token 的请求（仅 Docker Hub 主动处理）----------
+		const needToken = isDockerHub && url.pathname.startsWith('/v2/') && (
 			url.pathname.includes('/manifests/') ||
 			url.pathname.includes('/blobs/') ||
 			url.pathname.includes('/tags/') ||
@@ -149,7 +154,6 @@ export default {
 					'Connection': 'keep-alive',
 					'Cache-Control': 'max-age=0'
 				};
-				// 关键：用 Basic Auth 换取认证 token
 				if (basicAuth) {
 					tokenHeaders['Authorization'] = basicAuth;
 				}
@@ -186,7 +190,7 @@ export default {
 			}
 		}
 
-		// ---------- 普通请求（如 /v2/ 索引）----------
+		// ---------- 普通请求（适用于所有 registry）----------
 		const headers = {
 			'Host': hub_host,
 			'User-Agent': getReqHeader("User-Agent"),
@@ -196,19 +200,19 @@ export default {
 			'Connection': 'keep-alive',
 			'Cache-Control': 'max-age=0'
 		};
-		// 客户端自己带的认证优先
+		// 客户端自带认证优先
 		if (request.headers.has("Authorization")) {
 			headers['Authorization'] = getReqHeader("Authorization");
 		}
-		// 对于 Docker Hub，如果客户端没有认证，不强行注入（因为直接注入 PAT 无效）
-		// 而是由后续 401 挑战让客户端走认证流程，我们的 /token 端点会带上 Basic Auth。
 		if (request.headers.has("X-Amz-Content-Sha256")) {
 			headers['X-Amz-Content-Sha256'] = getReqHeader("X-Amz-Content-Sha256");
 		}
 
 		const response = await fetch(new Request(url, request), { headers, cacheTtl: 3600 });
 		const newHeaders = new Headers(response.headers);
-		if (newHeaders.get("Www-Authenticate")) {
+
+		// 仅 Docker Hub 时替换 Www-Authenticate 中的 auth.docker.io 为本 worker 地址
+		if (isDockerHub && newHeaders.get("Www-Authenticate")) {
 			newHeaders.set("Www-Authenticate", newHeaders.get("Www-Authenticate").replace(new RegExp(auth_url, 'g'), workers_url));
 		}
 		if (newHeaders.get("Location")) {
